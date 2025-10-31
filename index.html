@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SDA Study Assistant Chatbot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        .chat-container {
+            max-height: calc(100vh - 120px); /* Adjust height for mobile/desktop */
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+        .user-message {
+            background-color: #3B82F6; /* Blue */
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+        .ai-message {
+            background-color: #E5E7EB; /* Light Gray */
+            color: #1F2937;
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+        }
+        .loading-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #3B82F6;
+            border-radius: 50%;
+            display: inline-block;
+            margin: 0 2px;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+        .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dot:nth-child(2) { animation-delay: -0.16s; }
+        .loading-dot:nth-child(3) { animation-delay: 0s; }
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1.0); }
+        }
+        .quote-loading-dot {
+            background-color: #6366f1; /* Indigo for quote loading */
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin: 0 2px;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+
+    <!-- Main Chat Interface -->
+    <div class="w-full max-w-2xl bg-white rounded-xl shadow-2xl flex flex-col h-[90vh]">
+        
+        <!-- Header -->
+        <header class="p-4 border-b border-gray-100 bg-indigo-600 text-white rounded-t-xl shadow-lg">
+            <h1 class="text-xl font-bold">🕊️ SDA Study Assistant</h1>
+            <p class="text-sm opacity-90">Ask anything about the Seventh-day Adventist Church, its history, beliefs, or biblical interpretations.</p>
+        </header>
+
+        <!-- Chat Log -->
+        <div id="chatLog" class="chat-container flex-grow p-4 space-y-4">
+            
+            <!-- Initial Welcome Message -->
+            <div class="flex justify-start">
+                <div class="ai-message p-3 max-w-[85%] sm:max-w-[75%] rounded-t-xl rounded-r-xl shadow-md">
+                    Hello! I'm here to assist you with your studies regarding the **Seventh-day Adventist Church** and its biblical understanding. How can I help you today?
+                </div>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="p-4 border-t border-gray-200">
+            <form id="chatForm" class="flex items-center">
+                <input
+                    type="text"
+                    id="userInput"
+                    placeholder="E.g., What are the 28 fundamental beliefs?"
+                    autocomplete="off"
+                    class="flex-grow p-3 border border-gray-300 rounded-l-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 transition duration-150"
+                    required
+                />
+                <button
+                    type="submit"
+                    id="sendButton"
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-r-lg transition duration-150 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    Send
+                </button>
+            </form>
+            <div id="statusMessage" class="mt-2 text-sm text-center text-gray-500 hidden">
+                <span class="loading-dot"></span>
+                <span class="loading-dot"></span>
+                <span class="loading-dot"></span>
+                Thinking...
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript for Chat Logic and Gemini API -->
+    <script type="module">
+        // =================================================================
+        // GEMINI API CONFIGURATION (Embedded in Code)
+        // =================================================================
+
+        // 🛑 IMPORTANT: If running this locally (e.g., in VS Code) and you see a 403 Forbidden error,
+        // you MUST replace the empty string below with YOUR personal, valid Gemini API Key.
+        // If you are running this within the Canvas environment, leave it as an empty string.
+        const apiKey = "AIzaSyByb8qyYhDiHqLGp6DfkKfrYYNc3KOugHg";
+        const modelName = "gemini-2.5-flash-preview-09-2025";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+        // System Instruction to enforce the SDA-only topic constraint
+        const systemInstructionText = "You are a specialized, knowledgeable, and helpful AI assistant dedicated exclusively to answering questions about the Seventh-day Adventist Church (SDA), its beliefs, history, practices, and its understanding and interpretation of the Holy Bible. You must strictly decline to answer any question that falls outside of this specific religious domain. If a question is off-topic, politely state that you can only discuss Seventh-day Adventism and the Bible.";
+        
+        // System Instruction for the quote generation task
+        const quoteSystemInstruction = "You are a creative text generator. Your task is to generate a single, concise, inspirational quote (maximum 2 sentences) about the importance of the Holy Bible in guiding daily life and faith. Do not use markdown (like bold or bullet points). Provide the quote text only.";
+
+
+        // =================================================================
+        // DOM ELEMENTS & STATE
+        // =================================================================
+        const chatForm = document.getElementById('chatForm');
+        const userInput = document.getElementById('userInput');
+        const chatLog = document.getElementById('chatLog');
+        const sendButton = document.getElementById('sendButton');
+        const statusMessage = document.getElementById('statusMessage');
+
+        let isThinking = false;
+
+
+        // =================================================================
+        // API HELPER FUNCTIONS
+        // =================================================================
+
+        /**
+         * Utility function for exponential backoff fetch to handle API rate limiting.
+         */
+        async function exponentialBackoffFetch(url, options, maxRetries = 5) {
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return response;
+                    }
+                    if (response.status === 429 && attempt < maxRetries - 1) {
+                        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                        console.warn(`Rate limit hit (429). Retrying in ${delay / 1000}s...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                    throw new Error(`API request failed with status: ${response.status}`);
+                } catch (error) {
+                    if (attempt === maxRetries - 1) {
+                        console.error("Max retries reached. Request failed.", error);
+                        throw error;
+                    }
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    console.warn(`Request failed. Retrying in ${delay / 1000}s...`, error);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        /**
+         * Adds a message bubble to the chat log.
+         * @param {string} text The content of the message.
+         * @param {'user' | 'ai' | 'loading'} sender Who sent the message.
+         * @param {string} [sourcesHtml=''] HTML string for citations.
+         * @returns {HTMLElement} The created message element.
+         */
+        function addMessage(text, sender, sourcesHtml = '') {
+            const messageWrapper = document.createElement('div');
+            messageWrapper.className = 'flex ' + (sender === 'user' ? 'justify-end' : 'justify-start');
+
+            const messageBubble = document.createElement('div');
+            const baseClasses = 'p-3 max-w-[85%] sm:max-w-[75%] rounded-xl shadow-md';
+
+            if (sender === 'user') {
+                messageBubble.className = baseClasses + ' user-message';
+                messageBubble.classList.add('rounded-br-sm'); // Adjust corner for user
+            } else if (sender === 'ai') {
+                messageBubble.className = baseClasses + ' ai-message';
+                messageBubble.classList.add('rounded-bl-sm'); // Adjust corner for AI
+            } else if (sender === 'loading') {
+                messageBubble.className = baseClasses + ' ai-message flex items-center justify-center min-w-[75px]';
+                messageBubble.innerHTML = `
+                    <div class="loading-dot"></div>
+                    <div class="loading-dot"></div>
+                    <div class="loading-dot"></div>
+                `;
+            }
+
+            if (sender !== 'loading') {
+                // Convert markdown to HTML (basic implementation for line breaks/links)
+                let htmlText = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+                htmlText = htmlText.replace(/\n/g, '<br>');
+                messageBubble.innerHTML = htmlText + sourcesHtml;
+            }
+
+            messageWrapper.appendChild(messageBubble);
+            chatLog.appendChild(messageWrapper);
+            chatLog.scrollTop = chatLog.scrollHeight;
+            return messageBubble;
+        }
+
+        /**
+         * Generates an AI-driven inspirational quote about the Bible and adds it to the chat log.
+         */
+        async function generateAndAddQuote() {
+            const messageWrapper = document.createElement('div');
+            // Use justify-center and w-full utility for quote box centering
+            messageWrapper.className = 'flex justify-center w-full my-4'; 
+
+            const quoteBubble = document.createElement('div');
+            // Use the specific quote styling
+            quoteBubble.className = 'p-4 max-w-[90%] sm:max-w-[80%] rounded-xl shadow-inner bg-indigo-50 border-l-4 border-indigo-600 italic text-gray-700 text-center text-sm';
+            
+            // Initial loading state for the quote
+            quoteBubble.innerHTML = `<p class="text-center">Generating daily inspiration...</p>
+                <div class="flex justify-center mt-2">
+                    <div class="quote-loading-dot"></div>
+                    <div class="quote-loading-dot"></div>
+                    <div class="quote-loading-dot"></div>
+                </div>`;
+
+            messageWrapper.appendChild(quoteBubble);
+            chatLog.appendChild(messageWrapper);
+            chatLog.scrollTop = chatLog.scrollHeight;
+            
+            try {
+                const quotePayload = {
+                    contents: [{ parts: [{ text: "Generate an inspirational quote about the Bible for daily life." }] }],
+                    systemInstruction: {
+                        parts: [{ text: quoteSystemInstruction }]
+                    },
+                    // Note: No grounding tool is used for creative text generation
+                };
+
+                const response = await exponentialBackoffFetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(quotePayload)
+                });
+
+                const result = await response.json();
+                let generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                // Fallback text if API fails or returns empty
+                if (!generatedText) {
+                    generatedText = "The Bible is the compass that guides us through life's uncertain seas.";
+                }
+
+                // Clean and format the text
+                const quoteText = generatedText.trim().replace(/^['"]|['"]$/g, ''); // Remove surrounding quotes if present
+                
+                // Update the quote bubble with the generated text
+                quoteBubble.innerHTML = `
+                    <p class="mb-1 leading-relaxed text-base">
+                        "${quoteText}"
+                    </p>
+                    <p class="text-right text-xs font-semibold text-indigo-700">- SDA Quote</p>
+                `;
+
+            } catch (error) {
+                console.error("Error generating quote:", error);
+                // Display a permanent, known fallback quote on API failure
+                quoteBubble.innerHTML = `
+                    <p class="mb-1 leading-relaxed text-base">
+                        "Trust in the Lord with all your heart, and lean not on your own understanding."
+                    </p>
+                    <p class="text-right text-xs font-semibold text-indigo-700">- Proverbs 3:5 (Fallback)</p>
+                `;
+            }
+        }
+
+
+        // =================================================================
+        // MAIN CHAT LOGIC
+        // =================================================================
+
+        /**
+         * Handles the form submission and AI message generation.
+         */
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const userText = userInput.value.trim();
+            if (!userText || isThinking) return;
+
+            // 1. Display User Message
+            addMessage(userText, 'user');
+            userInput.value = ''; // Clear input
+
+            // 1.5. (Removed) Generate and Display a new AI-driven quote after user input.
+            // The quote is now only generated on page load/refresh.
+
+            // 2. Set UI to Thinking State
+            isThinking = true;
+            sendButton.disabled = true;
+            statusMessage.classList.remove('hidden');
+
+            // 3. Display Loading Message for the main response
+            const loadingMessage = addMessage('', 'loading');
+
+            try {
+                // Construct the API payload with the user's query and required controls
+                const payload = {
+                    contents: [{ parts: [{ text: userText }] }],
+                    // Use Google Search for grounded, factual SDA info
+                    tools: [{ "google_search": {} }], 
+                    // Apply the strict topic constraint
+                    systemInstruction: {
+                        parts: [{ text: systemInstructionText }]
+                    },
+                };
+
+                // Make the API call using the embedded fetch logic
+                const response = await exponentialBackoffFetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+
+                let aiText = "I apologize, but I couldn't process your request at this moment. Please try again.";
+                let sourcesHtml = '';
+
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    aiText = candidate.content.parts[0].text;
+
+                    // Extract grounding sources for citations
+                    let sources = [];
+                    const groundingMetadata = candidate.groundingMetadata;
+                    if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                        sources = groundingMetadata.groundingAttributions
+                            .map(attribution => ({
+                                uri: attribution.web?.uri,
+                                title: attribution.web?.title,
+                            }))
+                            .filter(source => source.uri && source.title);
+
+                        if (sources.length > 0) {
+                            sourcesHtml = '<div class="mt-2 text-xs text-gray-600 border-t border-gray-300 pt-2">';
+                            sourcesHtml += '<strong>Sources:</strong><ul class="list-disc ml-4 mt-1">';
+                            // Limit to first 3 sources for clean display
+                            sources.slice(0, 3).forEach((source, index) => {
+                                sourcesHtml += `<li><a href="${source.uri}" target="_blank" class="hover:underline">${source.title}</a></li>`;
+                            });
+                            sourcesHtml += '</ul></div>';
+                        }
+                    }
+                }
+
+                // 4. Replace Loading message with AI response
+                chatLog.removeChild(loadingMessage.parentElement);
+                addMessage(aiText, 'ai', sourcesHtml);
+
+            } catch (error) {
+                console.error("Error communicating with Gemini API:", error);
+                // 4. Display error message
+                chatLog.removeChild(loadingMessage.parentElement);
+                addMessage("I'm sorry, an error occurred while trying to fetch the information. Please check the console for details.", 'ai');
+            } finally {
+                // 5. Reset UI State
+                isThinking = false;
+                sendButton.disabled = false;
+                statusMessage.classList.add('hidden');
+                userInput.focus();
+            }
+        });
+
+        // Show the initial AI-generated quote after the welcome message on load
+        generateAndAddQuote();
+    </script>
+
+</body>
+</html>
